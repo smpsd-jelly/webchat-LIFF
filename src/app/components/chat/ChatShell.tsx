@@ -10,6 +10,7 @@ import ChatHeader from "./ChatHeader";
 import ChatMessages from "./ChatMessages";
 import FriendChoiceBubble from "./FriendChoiceBubble";
 import ChatComposer from "./ChatComposer";
+import BackButton from "../common/BackButton";
 
 type MeUser = {
   line_user_id: string;
@@ -22,6 +23,8 @@ type ChatMsg = {
   from: "oa" | "me" | "system";
   text: string;
   time: string;
+  ts: number;
+  clientId?: string;
 };
 
 type OAInfo = { displayName?: string; pictureUrl?: string; userId?: string };
@@ -39,9 +42,20 @@ type ApiMsg = {
   created_at: string;
 };
 
+function safeParseTs(input: unknown): number {
+  if (!input) return 0;
+  let s = String(input).trim();
+
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) {
+    s = s.replace(" ", "T");
+  }
+
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : 0;
+}
+
 function mapApiMsgToChatMsg(x: ApiMsg): ChatMsg {
-  const d = new Date(x.created_at);
-  const time = Number.isNaN(d.getTime()) ? "" : fmtHHMM(d);
+  const ts = safeParseTs(x.created_at);
 
   return {
     id: String(x.id),
@@ -52,7 +66,8 @@ function mapApiMsgToChatMsg(x: ApiMsg): ChatMsg {
           ? "me"
           : "system",
     text: x.text,
-    time,
+    time: ts ? fmtHHMM(new Date(ts)) : "",
+    ts,
   };
 }
 
@@ -61,6 +76,38 @@ function nowTime() {
   const hh = String(d.getHours()).padStart(2, "0");
   const mm = String(d.getMinutes()).padStart(2, "0");
   return `${hh}:${mm}`;
+}
+
+function mergeIncomingWithLocal(prev: ChatMsg[], incoming: ChatMsg[]) {
+  const byId = new Map<string, ChatMsg>();
+  for (const m of prev) byId.set(m.id, m);
+
+  const out = [...prev];
+
+  for (const inc of incoming) {
+    if (byId.has(inc.id)) continue;
+
+    if (inc.from === "me") {
+      const idx = out.findIndex(
+        (m) =>
+          m.id.startsWith("local-") &&
+          m.from === "me" &&
+          m.text === inc.text &&
+          Math.abs((m.ts || 0) - (inc.ts || 0)) <= 10000,
+      );
+
+      if (idx !== -1) {
+        out[idx] = { ...inc, clientId: out[idx].clientId || out[idx].id };
+        byId.set(inc.id, inc);
+        continue;
+      }
+    }
+
+    out.push(inc);
+    byId.set(inc.id, inc);
+  }
+
+  return out;
 }
 
 export default function ChatShell() {
@@ -86,6 +133,7 @@ export default function ChatShell() {
   const lastAfterRef = useRef<string | null>(null);
   const seenIdsRef = useRef<Set<string>>(new Set());
 
+  // ✅ CHANGE
   async function loadHistoryInitial() {
     const r = await apiGet("/messages/history");
     if (!r.ok) throw new Error(await r.text().catch(() => "history failed"));
@@ -93,12 +141,29 @@ export default function ChatShell() {
     const data = (await r.json()) as { messages: ApiMsg[] };
     const mapped = (data.messages || []).map(mapApiMsgToChatMsg);
 
+    // ✅ เซ็ต seen ids
     mapped.forEach((m) => seenIdsRef.current.add(m.id));
 
+    // ✅ เซ็ต after
     const last = data.messages?.[data.messages.length - 1]?.created_at;
     lastAfterRef.current = last || null;
 
-    setMessages(mapped);
+    // ✅ ถ้ามี history → ใช้เลย
+    if (mapped.length) {
+      setMessages(mapped);
+      return;
+    }
+
+    // ✅ ถ้าไม่มี history → inject สวัสดีครั้งเดียว
+    setMessages([
+      {
+        id: "oa-admin-hello",
+        from: "oa",
+        text: "สวัสดีครับ ต้องการสอบถามเรื่องอะไรครับ",
+        time: nowTime(),
+        ts: Date.now(),
+      },
+    ]);
   }
 
   async function pollNewMessages() {
@@ -134,7 +199,7 @@ export default function ChatShell() {
 
     if (!mapped.length) return;
 
-    setMessages((prev) => [...prev, ...mapped]);
+    setMessages((prev) => mergeIncomingWithLocal(prev, mapped));
   }
 
   useEffect(() => {
@@ -231,6 +296,7 @@ export default function ChatShell() {
           from: "oa",
           text: "สวัสดีครับ ต้องการสอบถามเรื่องอะไรครับ",
           time: nowTime(),
+          ts: Date.now(),
         },
       ];
     });
@@ -249,7 +315,6 @@ export default function ChatShell() {
 
         if (!alive) return;
 
-        // verify ถ้าระบบเรายังไม่ authed แต่ LIFF logged in
         const authedNow = await (async () => {
           try {
             const res = await apiGet("/auth/user");
@@ -272,7 +337,6 @@ export default function ChatShell() {
 
         await checkFriendship();
 
-        // ถ้าเป็นเพื่อนอยู่แล้ว -> auto set choice เป็น add (เพราะเขา add แล้ว)
         const alreadyFriend = await liff
           .getFriendship()
           .then((r) => !!r.friendFlag)
@@ -280,7 +344,7 @@ export default function ChatShell() {
 
         if (alive && alreadyFriend) {
           setFriendChoice("add");
-          ensureAdminHelloOnce(); // เข้ามาแล้วให้ admin ทักได้เลย
+          ensureAdminHelloOnce();
         }
       } catch (e) {
         console.error(e);
@@ -300,9 +364,26 @@ export default function ChatShell() {
       const liffId = process.env.NEXT_PUBLIC_LIFF_ID!;
       await liff.init({ liffId });
 
+      const redirectUri = `${window.location.origin}/user`;
+
       if (!liff.isLoggedIn()) {
-        liff.login();
+        liff.login({ redirectUri });
         return;
+      }
+
+      const idToken = liff.getIDToken();
+      if (!idToken) {
+        liff.logout();
+        window.location.href = redirectUri;
+        return;
+      }
+
+      const vr = await apiPost("/auth/line/verify", { idToken });
+      if (!vr.ok) {
+        const t = await vr.text().catch(() => "");
+        console.error("verify failed:", t);
+        liff.logout();
+        throw new Error("verify failed");
       }
 
       await checkAuth();
@@ -349,7 +430,7 @@ export default function ChatShell() {
       Swal.fire({
         icon: "warning",
         title: "ตั้งค่าไม่ครบ",
-        text: "ยังไม่ได้ตั้งค่า NEXT_PUBLIC_OA_ADD_FRIEND_URL",
+        text: "ยังไม่ได้ตั้งค่า",
       });
       return;
     }
@@ -410,9 +491,19 @@ export default function ChatShell() {
     const msg = text.trim();
     if (!msg) return;
 
+    const clientId = `local-${crypto.randomUUID()}`;
+    const ts = Date.now();
+
     setMessages((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), from: "me", text: msg, time: nowTime() },
+      {
+        id: clientId,
+        clientId,
+        from: "me",
+        text: msg,
+        time: fmtHHMM(new Date(ts)),
+        ts,
+      },
     ]);
 
     try {
@@ -426,25 +517,32 @@ export default function ChatShell() {
 
       if (!showedWaitingOnceRef.current) {
         showedWaitingOnceRef.current = true;
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            from: "system",
-            text: "กรุณารอการตอบกลับสักครู่",
-            time: nowTime(),
-          },
-        ]);
+
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === "sys-waiting-once")) return prev;
+
+          return [
+            ...prev,
+            {
+              id: "sys-waiting-once",
+              from: "system",
+              text: "กรุณารอการตอบกลับสักครู่",
+              time: "",
+              ts: Date.now(),
+            },
+          ];
+        });
       }
     } catch (e) {
       console.error(e);
       setMessages((prev) => [
         ...prev,
         {
-          id: crypto.randomUUID(),
+          id: `err-${clientId}`,
           from: "system",
           text: "ส่งไม่สำเร็จ กรุณาลองใหม่",
-          time: nowTime(),
+          time: "",
+          ts,
         },
       ]);
     }
@@ -454,6 +552,14 @@ export default function ChatShell() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-sky-50 via-blue-50 to-slate-50 p-6 text-slate-900">
+      <div className="mx-auto mb-3 w-full max-w-xl">
+        <BackButton
+          href="/"
+          label="Home"
+          className="text-black hover:underline"
+        />
+      </div>
+
       <main className="mx-auto flex h-[86vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200/70 bg-white shadow-[0_12px_40px_-24px_rgba(15,23,42,0.35)]">
         <ChatHeader
           isAuthed={isAuthed}
