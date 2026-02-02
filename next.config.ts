@@ -1,11 +1,14 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-   allowedDevOrigins: [
+  allowedDevOrigins: [
     "0edac273319a.ngrok-free.app",
     "localhost:3000",
     "127.0.0.1:3000",
     "192.168.1.37:3000",
   ],
+  devIndicators: {
+    buildActivity: false,
+  },
 
   async rewrites() {
     return [

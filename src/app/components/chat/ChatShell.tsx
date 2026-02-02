@@ -125,10 +125,8 @@ export default function ChatShell() {
   const pollingTimerRef = useRef<any>(null);
 
   const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const oaAddFriendUrl = useMemo(
-    () => process.env.NEXT_PUBLIC_OA_ADD_FRIEND_URL || "",
-    [],
-  );
+
+  const OA_BASIC_ID = process.env.NEXT_PUBLIC_OA_BASIC_ID;
 
   const lastAfterRef = useRef<string | null>(null);
   const seenIdsRef = useRef<Set<string>>(new Set());
@@ -425,18 +423,6 @@ export default function ChatShell() {
     }
   }
 
-  function openAddFriend() {
-    if (!oaAddFriendUrl) {
-      Swal.fire({
-        icon: "warning",
-        title: "ตั้งค่าไม่ครบ",
-        text: "ยังไม่ได้ตั้งค่า",
-      });
-      return;
-    }
-    liff.openWindow({ url: oaAddFriendUrl, external: true });
-  }
-
   async function recheckFriendship() {
     setLoading(true);
     try {
@@ -457,6 +443,13 @@ export default function ChatShell() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function openAddFriend() {
+    liff.openWindow({
+      url: `https://line.me/R/ti/p/${OA_BASIC_ID}`,
+      external: true,
+    });
   }
 
   async function onChooseAdd() {
